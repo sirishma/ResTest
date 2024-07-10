@@ -1,0 +1,166 @@
+import argparse
+from datetime import datetime
+import locale  
+import asyncio
+import aiohttp
+from dateutil import parser as date_parser
+from fuzzywuzzy import process
+from colorama import Fore, Style, init
+import time
+import logging
+
+#Initialize colorama
+init(autoreset=True)
+
+#Logging configuration
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+#Function to fetch sports results asynchronously
+async def fetch_sports_results_async(url, headers):
+    start_time = time.time()
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers) as response:
+            request_time = time.time() - start_time
+            logging.info(f"Time taken to send request and receive response (async): {request_time:.2f} seconds")
+            
+            if response.status == 200:
+                return await response.json(), request_time
+            else:
+                logging.error(f"Failed to fetch results: {response.status}")
+                return None, request_time
+
+#Function to sort results by publication date in reverse chronological order
+def sort_results(results, event_type=None):
+    start_time = time.time()
+    try:
+        if event_type:
+            sorted_results = {event_type: sorted(
+                results[event_type],
+                key=lambda x: date_parser.parse(x['publicationDate']),
+                reverse=True
+            )}
+            for result in sorted_results[event_type]:
+                result['category'] = event_type
+        else:
+            all_results = []
+            for category in results:
+                for result in results[category]:
+                    result['category'] = category
+                    all_results.append(result)
+            
+            sorted_results = sorted(
+                all_results,
+                key=lambda x: date_parser.parse(x['publicationDate']),
+                reverse=True
+            )
+        
+        elapsed_time = time.time() - start_time
+        logging.info(f"Time taken to sort results: {elapsed_time:.2f} seconds")
+        return sorted_results, elapsed_time
+    except Exception as e:
+        logging.error(f"Error while sorting results: {e}")
+        return results, 0
+
+#Function to display sorted results in CLI
+def display_results(results, event_type=None):
+    if results:
+        if event_type:
+            print(Fore.GREEN + f"Sorted {event_type} results:")
+            print_table(results[event_type])
+        else:
+            print(Fore.GREEN + "No clear match found, displaying all results:")
+            print_table(results)
+    else:
+        print(Fore.RED + "No results to display.")
+
+#Helper function to print results in a table format
+def print_table(results):
+    if results:
+        #Get all header keys from the results
+        headers = list({key for result in results for key in result.keys()})
+        
+        #Include category at the front
+        if 'category' in headers:
+            headers.remove('category')
+        headers.insert(0, 'category')
+        
+        #Max width for each column
+        max_widths = {
+            'category': 8,  
+            'publicationDate': 19
+        }
+        
+        #Adjusting column width based on actual content
+        col_widths = {header: min(max_widths.get(header, 15), max(len(header), max(len(str(result.get(header, '--'))) for result in results))) for header in headers}
+        
+        #Header format
+        header_format = " | ".join([f"{{:<{col_widths.get(header, 15)}}}" for header in headers])
+        print(Fore.CYAN + header_format.format(*headers))
+        print(Style.BRIGHT + "-" * (sum(col_widths.values()) + 3 * (len(headers) - 1)))
+        
+        #Row format
+        for result in results:
+            pub_date = date_parser.parse(result['publicationDate'])
+            formatted_pub_date = pub_date.strftime("%c")  
+            result['publicationDate'] = formatted_pub_date
+
+            row_format = " | ".join([f"{{:<{col_widths.get(header, 15)}}}" for header in headers])
+            row_data = [str(result.get(h, '--'))[:col_widths.get(h, 15)] for h in headers]
+            print(row_format.format(*row_data))
+    else:
+        print(Fore.RED + "No results to display.")
+
+#Task 2: Function to prompt user for category type using fuzzy search
+def prompt_user_for_category(results):
+    categories = set(results.keys())
+    print(Fore.GREEN + "Available categories:")
+    for category in categories:
+        print(category)
+
+    selected_category = input(Fore.YELLOW + "Enter the category type you want to display (e.g Tennis): ")
+
+    #Perform fuzzy matching to find closest category match
+    #Inspiration for Fuzzy search is from github
+    #Reference : https://github.com/seatgeek/fuzzywuzzy
+    matches = process.extract(selected_category, categories, limit=3)
+    print(Fore.GREEN + "Fuzzy search results:")
+    for match, score in matches:
+        print(f"{match} (score: {score})")
+
+    #Choose the category with the highest score. I have set the base score as 60, can be increased.
+    best_match, best_score = matches[0]
+    if best_score >= 60:  
+        print(Fore.GREEN + f"Did you mean this: {best_match}")
+        return best_match
+    else:
+        #print(Fore.RED + "No clear match found, displaying all results.")
+        return None
+
+#Main function for orchestration purpose
+async def main(locale_str=None, async_mode=False):
+    url = 'https://restest.free.beeceptor.com/results'
+    headers = {'Content-Type': 'application/json'}
+
+    results, request_time = await fetch_sports_results_async(url, headers)
+
+    if results:
+        if locale_str:
+            try:
+                #Task 3: Set the locale for date and time formatting
+                locale.setlocale(locale.LC_TIME, locale_str)
+            except locale.Error as e:
+                logging.error(f"Error setting locale: {e}")
+
+        event_type = prompt_user_for_category(results)
+        sorted_results, sort_time = sort_results(results, event_type)
+        logging.info(f"Total time for fetching and sorting: {request_time + sort_time:.2f} seconds")
+        display_results(sorted_results, event_type)
+
+if __name__ == '__main__':
+    arg_parser = argparse.ArgumentParser(description='Fetch and display sports results.')
+    arg_parser.add_argument('--locale', type=str, help='Specify the locale (e.g: en_US.UTF-8)')
+    args = arg_parser.parse_args()
+
+    asyncio.run(main(args.locale))
+
+
